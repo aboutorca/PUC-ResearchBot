@@ -3,6 +3,140 @@ import { promises as fs } from 'fs';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 
+/******************************
+ * LaserFiche Export Helper
+ ******************************/
+// Robustly download a PDF via LaserFiche's async export flow.
+// Returns { success: boolean, filepath?, size?, error? }
+// Fixed LaserFiche export implementation based on observed network traffic
+async function downloadLaserFicheDocument(page, doc) {
+  const downloadDir = path.resolve('./downloads');
+  await fs.mkdir(downloadDir, { recursive: true });
+
+  let downloadUrl = null;
+  let exportStarted = false;
+
+  const onResponse = async (res) => {
+    const url = res.url();
+    
+    // Look for the specific StartExport endpoint
+    if (url.includes('ZipEntriesHandler.aspx/StartExport')) {
+      console.log(`   🚀 StartExport detected for ${doc.filename}`);
+      console.log(`   📡 StartExport URL: ${url}`);
+      exportStarted = true;
+    }
+    
+    // The GetExportJob request IS the download URL  
+    if (url.includes('GetExportJob') && url.includes('Token=')) {
+      console.log(`   📥 GetExportJob detected for ${doc.filename}`);
+      console.log(`   🔗 Download URL: ${url}`);
+      downloadUrl = url;
+    }
+  };
+
+  page.on('response', onResponse);
+
+  try {
+    await page.goto(doc.viewerUrl, { waitUntil: 'networkidle0' });
+
+    console.log(`   🔍 Looking for download button on ${doc.filename}...`);
+
+    // Only look for the STR_DOWNLOAD button - no fallbacks
+    const downloadTriggered = await page.evaluate(async () => {
+      // Wait for the page to be fully loaded
+      await new Promise(r => setTimeout(r, 2000));
+      
+      const strDownload = document.querySelector('#STR_DOWNLOAD');
+      if (strDownload) {
+        console.log('✅ Found STR_DOWNLOAD button');
+        
+        // Hover then click
+        strDownload.dispatchEvent(new MouseEvent('mouseover', { 
+          bubbles: true, cancelable: true, view: window 
+        }));
+        await new Promise(r => setTimeout(r, 500));
+        strDownload.click();
+        return true;
+      }
+      
+      console.log('❌ STR_DOWNLOAD button not found');
+      return false;
+    });
+
+    if (!downloadTriggered) {
+      console.log(`   ❌ No download button found for ${doc.filename}`);
+      return { success: false, error: 'no-download-button' };
+    }
+
+    console.log(`   ⏳ Waiting for export to start for ${doc.filename}...`);
+    
+    // Wait for StartExport to be detected
+    const startTimeout = Date.now() + 15000; // 15 seconds
+    while (!exportStarted && Date.now() < startTimeout) {
+      await new Promise(r => setTimeout(r, 500));
+    }
+    
+    if (!exportStarted) {
+      console.log(`   ❌ Export never started for ${doc.filename}`);
+      return { success: false, error: 'export-not-started' };
+    }
+
+    // Wait for GetExportJob URL (the actual download)
+    console.log(`   ⏳ Waiting for download URL for ${doc.filename}...`);
+    const downloadTimeout = Date.now() + 90000; // Increased to 90 seconds
+    while (!downloadUrl && Date.now() < downloadTimeout) {
+      await new Promise(r => setTimeout(r, 2000)); // Check every 2 seconds instead of 1
+    }
+    
+    if (!downloadUrl) {
+      console.log(`   ❌ Download URL timeout for ${doc.filename}`);
+      return { success: false, error: 'download-url-timeout' };
+    }
+
+    console.log(`   📥 Downloading ${doc.filename}...`);
+
+    // Download the PDF using the captured URL
+    const cookies = await page.cookies();
+    const cookieHeader = cookies.map(c => `${c.name}=${c.value}`).join('; ');
+
+    const response = await fetch(downloadUrl, {
+      headers: {
+        'Cookie': cookieHeader,
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
+        'Referer': doc.viewerUrl,
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br, zstd',
+        'Connection': 'keep-alive',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'same-origin'
+      },
+    });
+    
+    if (!response.ok) {
+      console.log(`   ❌ Download failed: HTTP ${response.status}`);
+      return { success: false, error: `HTTP ${response.status}` };
+    }
+    
+    const buffer = Buffer.from(await response.arrayBuffer());
+    
+    // Clean filename and save
+    const safeName = doc.filename.replace(/[^a-zA-Z0-9._-]/g, '_');
+    const filePath = path.join(downloadDir, `${doc.caseNumber}_${safeName}`);
+    await fs.writeFile(filePath, buffer);
+
+    console.log(`   ✅ Downloaded ${doc.filename} (${(buffer.length / 1024 / 1024).toFixed(1)} MB)`);
+    return { success: true, filepath: filePath, size: buffer.length };
+    
+  } catch (err) {
+    console.log(`   💥 Error downloading ${doc.filename}: ${err.message}`);
+    return { success: false, error: err.message };
+  } finally {
+    page.off('response', onResponse);
+  }
+}
+
 // Listing pages for Idaho PUC cases
 const caseListingUrls = [
   { url: 'https://puc.idaho.gov/case?util=1&closed=0', type: 'electric', status: 'open' },
@@ -40,8 +174,6 @@ async function extractCaseListings(page, utilityType, caseStatus) {
       return cases;
     }
 
-    
-
     const rows = Array.from(caseTable.querySelectorAll('tr'));
     rows.forEach((row) => {
       const cells = row.querySelectorAll('td');
@@ -67,7 +199,6 @@ async function extractCaseListings(page, utilityType, caseStatus) {
       }
     });
 
-    
     return cases;
   }, { utilType: utilityType, status: caseStatus });
 }
@@ -147,39 +278,12 @@ async function validateCaseDate(page, startDate, endDate) {
   return isValid;
 }
 
-async function ensureDir(dirPath) {
-  try {
-    await fs.access(dirPath);
-  } catch {
-    await fs.mkdir(dirPath, { recursive: true });
-  }
-}
+// Legacy functions removed - no longer used
 
-async function downloadPdfDocument(page, docInfo, caseData, downloadRoot) {
-  await page.goto(docInfo.url, { waitUntil: 'networkidle0' });
-  const btn = await page.$('button[title*="download" i], a[title*="download" i], .download-btn');
-  if (!btn) throw new Error('Download button not found');
-  await ensureDir(downloadRoot);
-  await page._client.send('Page.setDownloadBehavior', { behavior: 'allow', downloadPath: downloadRoot });
-  await btn.click();
-  await page.waitForTimeout(4000);
-  const ts = new Date().toISOString().split('T')[0];
-  const safe = docInfo.filename.replace(/\s+/g, '_');
-  const filename = `${caseData.caseNumber}_${caseData.utilityType}_${caseData.caseStatus}_${docInfo.type}_${ts}_${safe}`;
-  return {
-    originalFilename: docInfo.filename,
-    savedFilename: filename,
-    documentType: docInfo.type,
-    caseNumber: caseData.caseNumber,
-    utilityType: caseData.utilityType,
-    caseStatus: caseData.caseStatus,
-    downloadUrl: docInfo.url,
-    downloadPath: path.join(downloadRoot, filename)
-  };
-}
+// Legacy text extraction function - removed as unused
 
 // NEW filtered implementation --------------------------------------------
-async function downloadCaseDocuments(page, caseInfo, _downloadPath) {
+async function downloadCaseDocuments(page, caseInfo) {
   try {
     console.log(`🔍 Analyzing Case Files structure for ${caseInfo.caseNumber}...`);
 
@@ -256,24 +360,24 @@ async function downloadCaseDocuments(page, caseInfo, _downloadPath) {
       return [];
     }
 
-    // Process only filtered documents (limit to 3 for testing)
+    // Download each target document via LaserFiche helper
     const processedDocs = [];
-    const limitedDocs = targetDocuments;
-
-    for (const doc of limitedDocs) {
+    for (const doc of targetDocuments) {
       try {
-        console.log(`📖 Processing: ${doc.section}/${doc.filename}`);
-        await page.goto(doc.viewerUrl, { waitUntil: 'networkidle0' });
-
-        const hasDownload = await page.evaluate(() => {
-          const downloadElements = document.querySelectorAll('[title*="download" i], [aria-label*="download" i]');
-          return downloadElements.length > 0;
-        });
-
-        processedDocs.push({ filename: doc.filename, section: doc.section, date: doc.date, viewerUrl: doc.viewerUrl, downloadAvailable: hasDownload, type: 'pdf' });
-        console.log(`   ${hasDownload ? '✅' : '❌'} Download ${hasDownload ? 'available' : 'not found'}`);
-      } catch (error) {
-        console.log(`💥 Error processing ${doc.filename}: ${error.message}`);
+        const res = await downloadLaserFicheDocument(page, { ...doc, caseNumber: caseInfo.caseNumber });
+        if (res.success) {
+          processedDocs.push({
+            ...doc,
+            filePath: res.filepath,
+            fileSize: res.size,
+            downloaded: true,
+            type: 'pdf'
+          });
+        } else {
+          console.log(`   ❌ Failed to download ${doc.filename}: ${res.error}`);
+        }
+      } catch (err) {
+        console.log(`💥 Error processing ${doc.filename}: ${err.message}`);
       }
     }
 
@@ -281,193 +385,6 @@ async function downloadCaseDocuments(page, caseInfo, _downloadPath) {
     return processedDocs;
   } catch (error) {
     console.log(`💥 Error in filtered document discovery: ${error.message}`);
-    return [];
-  }
-}
-
-// ------------------------------------------------------------------
-// Legacy diagnostic-heavy implementation retained for reference only
-// eslint-disable-next-line no-unused-vars
-async function legacyDownloadCaseDocuments(page, caseInfo, _downloadPath) {
-    // keep reference for linter
-    void downloadPdfDocument;
-    // reference to ensure linter considers helper used
-    void downloadPdfDocument;
-  try {
-    // ----- Overall page diagnostics -----
-    const pageInfo = await page.evaluate(() => ({
-      title: document.title,
-      url: window.location.href,
-      hasFilesSection: /Case Files/i.test(document.body.textContent),
-      hasDocuments: /\.pdf/i.test(document.body.textContent),
-      linkCount: document.querySelectorAll('a').length,
-      pdfLinkCount: document.querySelectorAll('a[href*=".pdf" i]').length,
-    }));
-    console.log(`📋 Page analysis for ${caseInfo.caseNumber}:`, pageInfo);
-
-    // ----- Strategy 1: direct PDF anchors -----
-    const pdfLinks = await page.evaluate(() => {
-      const links = Array.from(document.querySelectorAll('a[href*=".pdf" i]'));
-      return links.map((l) => ({ text: l.textContent.trim(), href: l.href, filename: l.href.split('/').pop() }));
-    });
-    if (pdfLinks.length) {
-      console.log(`📄 Found ${pdfLinks.length} PDF links:`, pdfLinks.map((l) => l.filename));
-    } else {
-      console.log('❌ No direct PDF links found');
-    }
-
-    // ----- Strategy 2: inspect "Case Files" sections -----
-    const caseFilesInfo = await page.evaluate(() => {
-      const elems = Array.from(document.querySelectorAll('*')).filter((el) => /Case Files/i.test(el.textContent) && el.tagName !== 'SCRIPT');
-      if (!elems.length) return { found: false, message: 'No "Case Files" section found' };
-      const sections = elems.map((element) => {
-        const gather = (root) => Array.from(root.querySelectorAll('a'));
-        const nearby = [
-          ...gather(element),
-          ...(element.parentElement ? gather(element.parentElement) : []),
-          ...(element.nextElementSibling ? gather(element.nextElementSibling) : []),
-          ...(element.nextElementSibling?.nextElementSibling ? gather(element.nextElementSibling.nextElementSibling) : []),
-        ];
-        return {
-          elementTag: element.tagName,
-          elementText: element.textContent.slice(0, 100),
-          nearbyLinkCount: nearby.length,
-          nearbyLinks: nearby.map((lnk) => ({ text: lnk.textContent.trim(), href: lnk.href, isPdf: /\.pdf/i.test(lnk.href) })),
-        };
-      });
-      return { found: true, sections };
-    });
-    console.log('📁 Case Files analysis:', caseFilesInfo);
-
-    // ----- Strategy 3: generic download elements -----
-    const downloadElements = await page.evaluate(() => {
-      const selectors = ['a[download]', 'button[title*="download" i]', 'a[title*="download" i]', 'a[href*="download" i]', '.download-link', '.file-download'];
-      const out = [];
-      selectors.forEach((sel) => {
-        document.querySelectorAll(sel).forEach((el) => {
-          out.push({ selector: sel, tag: el.tagName, text: el.textContent.trim(), href: el.href || 'no href', title: el.title || 'no title' });
-        });
-      });
-      return out;
-    });
-    if (downloadElements.length) {
-      console.log(`⬇️  Found ${downloadElements.length} download elements:`, downloadElements);
-    } else {
-      console.log('❌ No download elements found');
-    }
-
-    // ----- Smart Case-Files filtering for relevant documents -----
-    console.log('🔍 Looking for Case Files section...');
-    const caseDocs = await page.evaluate(() => {
-      const genericNames = [
-        'Final_Order_No_35474.pdf',
-        'SKM_C36822080116150.pdf',
-        'Incorporation_by_Reference_Rules_PDF_MAY2024.pdf',
-      ].map((n) => n.toUpperCase());
-
-      const isPdfLink = (href) => /\.pdf$/i.test(href);
-
-      const docs = [];
-
-      // find <div> blocks that contain the phrase "Case Files" plus date strings
-      const divs = Array.from(document.querySelectorAll('div')).filter((div) => {
-        const txt = div.textContent;
-        return /Case Files/i.test(txt) && /\d{2}\/\d{2}\/\d{4}/.test(txt) && /\.pdf/i.test(txt);
-      });
-
-      divs.forEach((div) => {
-        // first, anchor tags inside the block
-        const anchors = Array.from(div.querySelectorAll('a')).filter((a) => isPdfLink(a.href));
-        anchors.forEach((a) => {
-          const file = a.href.split('/').pop();
-          if (!genericNames.includes(file.toUpperCase())) {
-            docs.push({ filename: a.textContent.trim() || file, url: a.href, type: 'pdf' });
-          }
-        });
-
-        // fallback: parse plain text lines with date and filename
-        const matches = div.textContent.match(/(\d{2}\/\d{2}\/\d{4})\s+([^\n]+\.pdf)/gi) || [];
-        matches.forEach((m) => {
-          const [, datePart, fileName] = m.match(/(\d{2}\/\d{2}\/\d{4})\s+([^\n]+\.pdf)/i) || [];
-          if (fileName && !genericNames.includes(fileName.toUpperCase())) {
-            // attempt to find link with filename
-            const link = anchors.find((a) => a.href.toUpperCase().includes(fileName.toUpperCase()));
-            if (link) {
-              docs.push({ filename: fileName.trim(), url: link.href, type: 'pdf', fileDate: datePart });
-            }
-          }
-        });
-      });
-
-      // dedupe by url
-      return docs.filter((d, idx, arr) => idx === arr.findIndex((o) => o.url === d.url));
-    });
-
-    // --------------- Multi-step PDF viewer workflow ---------------
-    console.log(`📄 Finding PDF viewer links for ${caseInfo.caseNumber}...`);
-
-    const pdfViewerLinks = await page.evaluate(() => {
-      const divs = Array.from(document.querySelectorAll('div')).filter((d) => d.textContent.includes('Case Files') && /\.pdf/i.test(d.textContent));
-      const bad = ['Final_Order_No_35474', 'SKM_C36822080116150', 'Incorporation_by_Reference'];
-      const out = [];
-      divs.forEach((div) => {
-        div.querySelectorAll('a').forEach((a) => {
-          const txt = a.textContent.trim();
-          const href = a.href;
-          if (!href || !/\.pdf/i.test(txt)) return;
-          if (bad.some((b) => href.includes(b))) return;
-          out.push({ filename: txt, viewerUrl: href, type: 'pdf_viewer' });
-        });
-      });
-      return out;
-    });
-    console.log(`🔗 Found ${pdfViewerLinks.length} PDF viewer links:`, pdfViewerLinks.map((l) => l.filename));
-    if (!pdfViewerLinks.length) return [];
-
-    const discovered = [];
-
-    for (const link of pdfViewerLinks) {
-      try {
-        console.log(`📖 Opening PDF viewer for: ${link.filename}`);
-        await page.goto(link.viewerUrl, { waitUntil: 'networkidle0' });
-
-        const dlInfo = await page.evaluate(() => {
-          const selectors = [
-            'button[title*="download" i]',
-            'a[title*="download" i]',
-            'button[aria-label*="download" i]',
-            'a[aria-label*="download" i]',
-            '.download-button',
-            '.download-link',
-            '[data-download]'
-          ];
-          let elem = null;
-          for (const sel of selectors) {
-            const found = document.querySelector(sel);
-            if (found) { elem = found; break; }
-          }
-          if (!elem) {
-            elem = Array.from(document.querySelectorAll('button,a,span,div')).find((e) => /download/i.test(e.textContent));
-          }
-          return elem ? {
-            tag: elem.tagName,
-            text: elem.textContent.trim(),
-            title: elem.title || null,
-            className: elem.className || null,
-          } : null;
-        });
-        const hasDownload = !!dlInfo;
-        console.log('🔍 Download button analysis:', dlInfo || 'none');
-        discovered.push({ filename: link.filename, viewerUrl: link.viewerUrl, downloadAvailable: hasDownload, downloadButtonInfo: dlInfo, type: 'pdf' });
-      } catch (err) {
-        console.log(`💥 Error processing ${link.filename}: ${err.message}`);
-      }
-    }
-
-    console.log(`📋 Document discovery complete: ${discovered.length} documents processed`);
-    return discovered;
-  } catch (error) {
-    console.log(`💥 Error in downloadCaseDocuments for ${caseInfo.caseNumber}: ${error.message}`);
     return [];
   }
 }
@@ -481,52 +398,56 @@ class Crawler {
     const result = { jobId: uuidv4(), query, utilities, dateRange, casesFound: [], summary: { totalCases: 0, totalDocuments: 0, processingTime: 0 } };
     const startTime = Date.now();
     const page = await browser.newPage();
+    
+    // Add browser console logging to see what's happening in the page
+    page.on('console', msg => console.log('BROWSER:', msg.text()));
+    
     try {
       for (const util of utilities) {
         for (const link of caseListingUrls.filter((u) => u.type === util)) {
           await page.goto(link.url, { waitUntil: 'networkidle0' });
           const allCases = await extractCaseListings(page, link.type, link.status);
 
-const matchingCases = allCases.filter((c) => matchesQuery(c, query));
-console.log(`Processing ${matchingCases.length} matching cases for ${link.type} ${link.status}`);
+          const matchingCases = allCases.filter((c) => matchesQuery(c, query));
+          console.log(`Processing ${matchingCases.length} matching cases for ${link.type} ${link.status}`);
 
-let consecutiveInvalidDates = 0;
-const MAX_CONSECUTIVE_INVALID = 5;
+          let consecutiveInvalidDates = 0;
+          const MAX_CONSECUTIVE_INVALID = 5;
 
-for (const c of matchingCases) {
-  try {
-    await page.goto(c.caseUrl, { waitUntil: 'networkidle0' });
-    const isValidDate = await validateCaseDate(page, dateRange.start, dateRange.end);
+          for (const c of matchingCases) {
+            try {
+              await page.goto(c.caseUrl, { waitUntil: 'networkidle0' });
+              const isValidDate = await validateCaseDate(page, dateRange.start, dateRange.end);
 
-    if (!isValidDate) {
-      consecutiveInvalidDates += 1;
-      console.log(`❌ ${c.caseNumber} - invalid date (${consecutiveInvalidDates} consecutive)`);
-      if (consecutiveInvalidDates >= MAX_CONSECUTIVE_INVALID) {
-        console.log(`🛑 Stopping search - found ${consecutiveInvalidDates} consecutive cases outside date range`);
-        break;
-      }
-      continue;
-    }
+              if (!isValidDate) {
+                consecutiveInvalidDates += 1;
+                console.log(`❌ ${c.caseNumber} - invalid date (${consecutiveInvalidDates} consecutive)`);
+                if (consecutiveInvalidDates >= MAX_CONSECUTIVE_INVALID) {
+                  console.log(`🛑 Stopping search - found ${consecutiveInvalidDates} consecutive cases outside date range`);
+                  break;
+                }
+                continue;
+              }
 
-    // Reset counter after a valid date
-    consecutiveInvalidDates = 0;
-    console.log(`✅ ${c.caseNumber} - valid date, downloading documents...`);
+              // Reset counter after a valid date
+              consecutiveInvalidDates = 0;
+              console.log(`✅ ${c.caseNumber} - valid date, downloading documents...`);
 
-    const docs = await downloadCaseDocuments(page, c, path.resolve('./downloads'));
-    if (docs.length) {
-      result.casesFound.push({ ...c, documents: docs });
-      result.summary.totalDocuments += docs.length;
-      console.log(`📄 Downloaded ${docs.length} documents for ${c.caseNumber}`);
-    } else {
-      console.log(`⚠️  No documents found for ${c.caseNumber}`);
-      result.casesFound.push({ ...c, documents: [] });
-    }
-  } catch (error) {
-    console.log(`💥 Error processing case ${c.caseNumber}: ${error.message}`);
-    // Do not increment invalid date counter on errors
-  }
-}
-console.log(`Finished processing ${link.type} ${link.status} cases`);
+              const docs = await downloadCaseDocuments(page, c);
+              if (docs.length) {
+                result.casesFound.push({ ...c, documents: docs });
+                result.summary.totalDocuments += docs.length;
+                console.log(`📄 Downloaded ${docs.length} documents for ${c.caseNumber}`);
+              } else {
+                console.log(`⚠️  No documents found for ${c.caseNumber}`);
+                result.casesFound.push({ ...c, documents: [] });
+              }
+            } catch (error) {
+              console.log(`💥 Error processing case ${c.caseNumber}: ${error.message}`);
+              // Do not increment invalid date counter on errors
+            }
+          }
+          console.log(`Finished processing ${link.type} ${link.status} cases`);
         }
       }
     } finally {
@@ -539,4 +460,9 @@ console.log(`Finished processing ${link.type} ${link.status} cases`);
 }
 
 const pucCrawler = new Crawler();
+
+// Convenience named wrapper
+export async function crawlCases(query, utilities, dateRange) {
+  return pucCrawler.crawlCases(query, utilities, dateRange);
+}
 export default pucCrawler;
