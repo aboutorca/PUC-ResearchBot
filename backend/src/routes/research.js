@@ -6,6 +6,23 @@ const router = Router();
 // In-memory store for job status (in production, use a database)
 const jobStatus = new Map();
 
+/**
+ * @route   POST /api/research/init
+ * @desc    Initialize the research service
+ * @access  Public
+ */
+router.post('/init', (req, res) => {
+  try {
+    // This endpoint can be used for any one-time setup or health check.
+    // For now, it just confirms the service is ready.
+    console.log('Research service initialized successfully.');
+    res.status(200).json({ message: 'Service initialized successfully' });
+  } catch (error) {
+    console.error('Error during service initialization:', error);
+    res.status(500).json({ error: 'Service initialization failed' });
+  }
+});
+
 // Note: The following import is not currently used but will be needed later
 // import { supabase } from '../config/database.js';
 
