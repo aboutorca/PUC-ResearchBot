@@ -1,7 +1,7 @@
 // backend/src/services/processor.js
 // Clean Document Processor - Production Ready
 
-import fs from 'fs';
+import fs from 'fs/promises';
 import path from 'path';
 import crypto from 'crypto';
 
@@ -38,11 +38,15 @@ class DocumentProcessor {
         // Read document file
         const documentText = await this.readDocumentFile(document.filepath);
         
-        if (!documentText || documentText.length < this.minChunkSize) {
-          console.log(`⚠️ Skipping ${document.documentName} - too short or empty`);
+        // Gracefully skip if file read failed
+        if (!documentText) {
+          console.log(`⚠️ Skipping ${document.documentName} - file could not be read or was empty`);
           processingStats.skippedDocuments++;
+          processingStats.processingErrors++;
           continue;
         }
+        
+
 
         // Handle large documents
         let processedText = documentText;
@@ -95,11 +99,8 @@ class DocumentProcessor {
    */
   async readDocumentFile(filepath) {
     try {
-      if (!fs.existsSync(filepath)) {
-        throw new Error(`File not found: ${filepath}`);
-      }
-      
-      const content = fs.readFileSync(filepath, 'utf8');
+      await fs.access(filepath); // Check if file exists and is accessible
+      const content = await fs.readFile(filepath, 'utf8');
       
       // Extract content after metadata
       const metadataEnd = content.indexOf('===== END METADATA =====');
@@ -109,8 +110,12 @@ class DocumentProcessor {
       
       return content.trim();
     } catch (error) {
-      console.log(`❌ Error reading file ${filepath}: ${error.message}`);
-      return null;
+      if (error.code === 'ENOENT') {
+        console.log(`❌ File not found: ${filepath}`);
+      } else {
+        console.log(`❌ Error reading file ${filepath}: ${error.message}`);
+      }
+      return null; // Return null to allow processing to continue
     }
   }
 
@@ -123,21 +128,21 @@ class DocumentProcessor {
     // Basic text cleanup
     const cleanedText = this.cleanText(text);
     
-    // Extract pages if they exist
+    // Check if document has page breaks
     const pages = this.extractPages(cleanedText);
     
-    if (pages.length === 0) {
-      // No page markers - process as single document
-      return this.createChunksFromText(cleanedText, documentMetadata, null);
+    if (pages.length <= 1) {
+      // No page breaks found, process as single document
+      return this.createChunksFromText(cleanedText, documentMetadata, null, cleanedText);
+    } else {
+      // Process each page separately
+      const allChunks = [];
+      for (const page of pages) {
+        const pageChunks = this.createChunksFromText(page.content, documentMetadata, page.pageNumber, cleanedText);
+        allChunks.push(...pageChunks);
+      }
+      return allChunks;
     }
-
-    // Process each page
-    pages.forEach((page) => {
-      const pageChunks = this.createChunksFromText(page.content, documentMetadata, page.pageNumber);
-      chunks.push(...pageChunks);
-    });
-
-    return chunks;
   }
 
   /**
@@ -170,13 +175,13 @@ class DocumentProcessor {
   }
 
   /**
-   * Create chunks from text with safe limits
+   * Create chunks from text with overlapping windows
    */
-  createChunksFromText(text, documentMetadata, pageNumber) {
+  createChunksFromText(text, documentMetadata, pageNumber, fullDocumentText = null) {
     const chunks = [];
     
     if (text.length <= this.chunkSize) {
-      chunks.push(this.createChunk(text, documentMetadata, pageNumber, 1, 1));
+      chunks.push(this.createChunk(text, documentMetadata, pageNumber, 1, 1, fullDocumentText));
       return chunks;
     }
 
@@ -199,7 +204,7 @@ class DocumentProcessor {
       }
       
       if (chunkText.trim().length >= this.minChunkSize) {
-        chunks.push(this.createChunk(chunkText.trim(), documentMetadata, pageNumber, chunkIndex, this.maxChunksPerDoc));
+        chunks.push(this.createChunk(chunkText.trim(), documentMetadata, pageNumber, chunkIndex, this.maxChunksPerDoc, fullDocumentText));
         chunkIndex++;
       }
       
@@ -217,12 +222,12 @@ class DocumentProcessor {
   }
 
   /**
-   * Create a chunk object with complete metadata
+   * Create a chunk object with complete metadata and JSON overlay
    */
-  createChunk(content, documentMetadata, pageNumber, chunkIndex, totalChunks) {
+  createChunk(content, documentMetadata, pageNumber, chunkIndex, totalChunks, fullDocumentText = null, searchQuery = null) {
     const chunkId = this.generateChunkId(documentMetadata, pageNumber, chunkIndex);
     
-    return {
+    const chunk = {
       // Unique identifiers
       id: chunkId,
       documentId: documentMetadata.filename,
@@ -239,6 +244,7 @@ class DocumentProcessor {
       documentName: documentMetadata.documentName,
       documentType: documentMetadata.documentType,
       documentUrl: documentMetadata.documentUrl,
+      fileName: documentMetadata.filename, // Add fileName for appendix detection
       
       // Pagination
       pageNumber: pageNumber,
@@ -261,6 +267,13 @@ class DocumentProcessor {
         source: 'Idaho Public Utilities Commission'
       }
     };
+    
+    // Add JSON overlay if full document text is available
+    if (fullDocumentText) {
+      return this.addJSONOverlay(chunk, fullDocumentText, searchQuery);
+    }
+    
+    return chunk;
   }
 
   /**
@@ -336,6 +349,237 @@ class DocumentProcessor {
       acc[key] = (acc[key] || 0) + 1;
       return acc;
     }, {});
+  }
+
+  /**
+   * Add JSON overlay to existing chunk structure
+   * This enhances chunks with structured data while keeping all existing fields
+   */
+  addJSONOverlay(chunk, fullDocumentText, searchQuery = null) {
+    try {
+      // Extract metadata from full document text (for witness info, etc.)
+      const documentMetadata = this.parseFullDocumentMetadata(fullDocumentText);
+      
+      // Create structured overlay
+      chunk.structured = {
+        metadata: {
+          witness: this.extractWitnessInfo(chunk.content, documentMetadata),
+          section: this.extractSection(chunk.content),
+          topic: this.categorizeContent(chunk.content),
+          documentContext: {
+            isDirectTestimony: chunk.documentType?.includes('Direct') || false,
+            isAppendix: this.isAppendixContent(chunk),
+            isFinancialData: this.containsFinancialData(chunk.content),
+            isTableData: /Table No\.|Line\s+\d+|Row\s+\d+/i.test(chunk.content)
+          }
+        },
+        financial: this.extractFinancialData(chunk.content),
+        testimony: this.extractTestimonyStructure(chunk.content),
+        quotes: this.extractKeyQuotes(chunk.content, chunk.pageNumber, searchQuery),
+        entities: this.extractEntities(chunk.content),
+        searchTerms: this.generateEnhancedSearchTerms(chunk.content, chunk, searchQuery),
+        contentAnalysis: {
+          hasQAFormat: /Q\.\s+.*?A\.\s+/i.test(chunk.content),
+          hasTable: /Table No\.|Line\s+\d+|Row\s+\d+/i.test(chunk.content),
+          hasFinancialData: this.containsFinancialData(chunk.content),
+          hasRegulatoryLanguage: /commission|approved?|authorized?|requests?|proposes?/i.test(chunk.content),
+          wordCount: chunk.content.split(/\s+/).length,
+          queryRelevance: searchQuery ? this.calculateQueryRelevance(chunk.content, searchQuery) : null
+        }
+      };
+      
+      return chunk;
+      
+    } catch (error) {
+      console.log(`⚠️ Error adding JSON overlay to chunk ${chunk.id}: ${error.message}`);
+      // Add minimal structure on error
+      chunk.structured = {
+        metadata: { topic: 'unknown' },
+        financial: { amounts: [], percentages: [] },
+        searchTerms: this.generateBasicSearchTerms(chunk.content),
+        contentAnalysis: { wordCount: chunk.content.split(/\s+/).length }
+      };
+      return chunk;
+    }
+  }
+
+  // Helper methods for JSON overlay functionality
+  parseFullDocumentMetadata(fullDocumentText) {
+    const metadata = {};
+    const witnessMatch = fullDocumentText.match(/DIRECT TESTIMONY\s+OF\s+([A-Z\s\.]+)\s+FOR/i) ||
+                        fullDocumentText.match(/([A-Z][a-z]+ [A-Z][a-z]+),\s+Di\s+\d+/);
+    if (witnessMatch) {
+      metadata.witness = witnessMatch[1].trim();
+    }
+    return metadata;
+  }
+
+  extractFinancialData(content) {
+    const financial = { amounts: [], percentages: [], timeframes: [] };
+    const dollarRegex = /\$[\d,]+(?:\.\d+)?\s*(?:million|thousand|billion|M|K|B)?/gi;
+    const percentRegex = /\d+\.?\d*\s*%|\d+\.?\d*\s*percent/gi;
+    
+    financial.amounts = [...content.matchAll(dollarRegex)].map(match => ({
+      value: match[0],
+      context: this.getContextAroundMatch(content, match.index, 80).trim(),
+      position: match.index
+    }));
+    
+    financial.percentages = [...content.matchAll(percentRegex)].map(match => ({
+      value: match[0],
+      context: this.getContextAroundMatch(content, match.index, 60).trim(),
+      position: match.index
+    }));
+    
+    return financial;
+  }
+
+  extractTestimonyStructure(content) {
+    return {
+      format: /Q\.\s+/i.test(content) && /A\.\s+/i.test(content) ? 'qa_testimony' : 'unknown',
+      isQuestion: /Q\.\s+/.test(content),
+      isAnswer: /A\.\s+/.test(content),
+      topic: this.categorizeContent(content)
+    };
+  }
+
+  categorizeContent(content) {
+    const lowerContent = content.toLowerCase();
+    if (lowerContent.includes('rate of return') || lowerContent.includes('return on equity') || lowerContent.includes('roe')) {
+      return 'rate_of_return';
+    }
+    if (lowerContent.includes('revenue requirement') || lowerContent.includes('rate increase')) {
+      return 'revenue_requirement';
+    }
+    return 'general_testimony';
+  }
+
+  extractWitnessInfo(content, documentMetadata) {
+    if (documentMetadata.witness) {
+      return { name: documentMetadata.witness, source: 'document_header' };
+    }
+    const witnessMatch = content.match(/([A-Z][a-z]+ [A-Z][a-z]+),\s+Di\s+\d+/);
+    return witnessMatch ? { name: witnessMatch[1], source: 'content' } : null;
+  }
+
+  extractSection(content) {
+    const sectionMatch = content.match(/([IVX]+\.\s+[A-Z\s]+)/) ||
+                        content.match(/(Section\s+[A-Z0-9]+[:\.]?\s+[A-Z][^\n]*)/i);
+    return sectionMatch ? sectionMatch[1].trim() : null;
+  }
+
+  isAppendixContent(chunk) {
+    const content = chunk.content.toLowerCase();
+    const fileName = chunk.fileName ? chunk.fileName.toLowerCase() : '';
+    return content.includes('appendix') || fileName.includes('appendix') ||
+           /schedule\s+[a-z0-9]+/i.test(content) || /exhibit\s+[a-z0-9]+/i.test(content);
+  }
+
+  containsFinancialData(content) {
+    return /\$[\d,]+|\.\d+\s*%|\d+\.\d+\s*percent/i.test(content);
+  }
+
+  extractKeyQuotes(content, pageNumber, searchQuery = null) {
+    const quotes = [];
+    const sentences = content.split(/[.!?]+/);
+    
+    sentences.forEach((sentence, index) => {
+      const trimmed = sentence.trim();
+      if (trimmed.length < 20) return;
+      
+      let score = 0;
+      if (/\$[\d,]+/.test(trimmed)) score += 3;
+      if (/\d+\.?\d*\s*%/.test(trimmed)) score += 3;
+      if (/commission|approved?|authorized?|requests?|proposes?/i.test(trimmed)) score += 2;
+      
+      if (searchQuery) {
+        const queryWords = searchQuery.toLowerCase().split(/\s+/);
+        queryWords.forEach(word => {
+          if (trimmed.toLowerCase().includes(word)) score += 2;
+        });
+      }
+      
+      if (score >= 3) {
+        quotes.push({ text: trimmed, score: score, page: pageNumber, position: index });
+      }
+    });
+    
+    return quotes.sort((a, b) => b.score - a.score).slice(0, 3);
+  }
+
+  extractEntities(content) {
+    const entities = { companies: [], people: [], locations: [], regulations: [] };
+    const companyRegex = /[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\s+(?:Corp|Corporation|Inc|LLC|Company|Co\.|Ltd)/g;
+    const peopleRegex = /(?:Mr\.|Ms\.|Dr\.|Mrs\.)\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*/g;
+    const locationRegex = /\b(?:Idaho|Utah|Oregon|Washington|California|Nevada|Montana)\b/g;
+    const regulationRegex = /\b(?:Commission|IPUC|FERC|Order|Docket|Case|Tariff|Schedule)\s+[A-Z0-9-]+/g;
+    
+    entities.companies = [...new Set([...content.matchAll(companyRegex)].map(m => m[0]))];
+    entities.people = [...new Set([...content.matchAll(peopleRegex)].map(m => m[0]))];
+    entities.locations = [...new Set([...content.matchAll(locationRegex)].map(m => m[0]))];
+    entities.regulations = [...new Set([...content.matchAll(regulationRegex)].map(m => m[0]))];
+    
+    return entities;
+  }
+
+  generateEnhancedSearchTerms(content, chunk, searchQuery = null) {
+    const terms = new Set();
+    const basicTerms = this.generateBasicSearchTerms(content);
+    basicTerms.forEach(term => terms.add(term));
+    
+    if (this.containsFinancialData(content)) {
+      terms.add('financial_data');
+      terms.add('monetary_amounts');
+    }
+    
+    if (/rate.*return|return.*equity|roe/i.test(content)) {
+      terms.add('rate_of_return');
+      terms.add('equity_return');
+      terms.add('roe');
+    }
+    
+    if (/Q\.\s+.*A\.\s+/i.test(content)) {
+      terms.add('qa_testimony');
+      terms.add('direct_testimony');
+    }
+    
+    if (chunk.documentType) {
+      terms.add(chunk.documentType.toLowerCase().replace(/\s+/g, '_'));
+    }
+    
+    return Array.from(terms);
+  }
+
+  generateBasicSearchTerms(content) {
+    const terms = new Set();
+    const words = content.toLowerCase().match(/\b[a-z]{3,}\b/g) || [];
+    const stopWords = new Set(['the', 'and', 'for', 'are', 'but', 'not', 'you', 'all', 'can', 'had', 'her', 'was', 'one', 'our', 'out', 'day', 'get', 'has', 'him', 'his', 'how', 'man', 'new', 'now', 'old', 'see', 'two', 'way', 'who', 'boy', 'did', 'its', 'let', 'put', 'say', 'she', 'too', 'use']);
+    
+    words.forEach(word => {
+      if (!stopWords.has(word) && word.length >= 4) {
+        terms.add(word);
+      }
+    });
+    
+    return Array.from(terms).slice(0, 20);
+  }
+
+  calculateQueryRelevance(content, searchQuery) {
+    if (!searchQuery) return 0;
+    const queryWords = searchQuery.toLowerCase().split(/\s+/);
+    const contentLower = content.toLowerCase();
+    let score = 0;
+    queryWords.forEach(word => {
+      const matches = (contentLower.match(new RegExp(word, 'g')) || []).length;
+      score += matches;
+    });
+    return score;
+  }
+
+  getContextAroundMatch(content, position, contextLength = 100) {
+    const start = Math.max(0, position - contextLength / 2);
+    const end = Math.min(content.length, position + contextLength / 2);
+    return content.substring(start, end);
   }
 }
 

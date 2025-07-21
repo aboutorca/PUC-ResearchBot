@@ -44,7 +44,7 @@ router.post('/:sessionId/message', async (req, res) => {
     const response = await axios.post(
       'https://openrouter.ai/api/v1/chat/completions',
       {
-        model: process.env.AI_MODEL_CHAT || 'anthropic/claude-3.5-sonnet',
+        model: process.env.AI_MODEL_CHAT || 'google/gemini-2.5-flash',
         messages: [
           {
             role: 'system',

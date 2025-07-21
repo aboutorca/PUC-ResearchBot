@@ -6,22 +6,17 @@ const app = express();
 const port = 3002; // Port for the backend server
 
 // Middleware
-app.use(cors()); // Enable CORS for all routes
+const corsOptions = {
+  origin: 'http://localhost:3000', // Allow only the frontend to connect
+  optionsSuccessStatus: 200 // For legacy browser support
+};
+app.use(cors(corsOptions)); // Enable CORS with specific options
 app.use(express.json()); // Enable JSON body parsing
 
 const researchService = new DynamicPUCResearchService();
 let isServiceInitialized = false;
 
-// Initialize the service once at startup
-researchService.initialize()
-  .then(() => {
-    isServiceInitialized = true;
-    console.log('✅ Backend service initialized and ready.');
-  })
-  .catch(error => {
-    console.error('🚨 Failed to initialize backend service:', error);
-    process.exit(1); // Exit if service fails to initialize
-  });
+
 
 // API Endpoints
 
@@ -70,16 +65,53 @@ app.post('/api/research', async (req, res) => {
 });
 
 // Endpoint for chat
+// Endpoint for document URL
+app.post('/api/research/document-url', async (req, res) => {
+  try {
+    const { caseNumber, documentName } = req.body;
+    if (!caseNumber || !documentName) {
+      return res.status(400).json({ error: 'Missing required parameters' });
+    }
+
+    const url = await researchService.getDocumentUrl(caseNumber, documentName);
+
+    if (url) {
+      res.json({ url });
+    } else {
+      // Fallback URL if no specific one is found
+      const cleanCaseNumber = caseNumber.replace(/[^A-Z0-9-]/g, '');
+      res.json({ url: `https://puc.idaho.gov/case/${cleanCaseNumber}` });
+    }
+  } catch (error) {
+    console.error('API Error fetching document URL:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Endpoint for chat
 app.post('/api/chat', async (req, res) => {
   try {
-    const { sessionId, message } = req.body;
-    const result = await researchService.generateChatResponse(message, sessionId);
+    const { sessionId, message, chatHistory } = req.body;
+    const result = await researchService.generateChatResponse(message, sessionId, chatHistory);
     res.json({ success: true, message: result.message, citations: result.citations });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
 });
 
-app.listen(port, () => {
-  console.log(`🚀 Backend server listening on http://localhost:${port}`);
-});
+const startServer = async () => {
+  try {
+    await researchService.initialize();
+    isServiceInitialized = true;
+    console.log('✅ Backend service initialized and ready.');
+
+    app.listen(port, () => {
+      console.log(`🚀 Backend server listening on http://localhost:${port}`);
+    });
+  } catch (error) {
+    console.error('🚨 Failed to initialize backend service:', error);
+    process.exit(1); // Exit if service fails to initialize
+  }
+};
+
+startServer();
