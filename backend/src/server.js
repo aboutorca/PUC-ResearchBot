@@ -88,14 +88,32 @@ app.post('/api/research/document-url', async (req, res) => {
   }
 });
 
-// Endpoint for chat
+// Endpoint for chat - Updated for optimized backend
 app.post('/api/chat', async (req, res) => {
   try {
-    const { sessionId, message, chatHistory } = req.body;
-    const result = await researchService.generateChatResponse(message, sessionId, chatHistory);
-    res.json({ success: true, message: result.message, citations: result.citations });
+    const { sessionId, message } = req.body;
+    console.log(`💬 Chat request: sessionId=${sessionId}, message="${message}"`);
+    
+    const result = await researchService.generateChatResponse(message, sessionId);
+    
+    // ✅ RETURN STRUCTURED FORMAT (matches ChatMessage.tsx expectations)
+    res.json({ 
+      message: result.message, // Keep the FULL structured object
+      citations: result.citations,
+      sessionId: result.sessionId,
+      // Optional metadata for debugging
+      metadata: {
+        tokensUsed: result.tokensUsed,
+        relevantDocuments: result.relevantDocuments
+      }
+    });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    console.error('❌ Chat endpoint error:', error);
+    res.status(500).json({ 
+      message: "I apologize, but I encountered an error processing your request. Please try again.",
+      citations: [],
+      sessionId: sessionId 
+    });
   }
 });
 
