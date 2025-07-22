@@ -1,20 +1,18 @@
 import dotenv from 'dotenv';
-import fs from 'fs/promises';
-import path from 'path';
-import { fileURLToPath } from 'url';
 import crypto from 'crypto';
 
 dotenv.config();
 
 import { crawlCases } from './crawler.js';
 import { processExtractedDocuments } from './processor.js';
+import DocumentProcessor from './processor.js';
 
 // Configuration
 const CONFIG = {
   openRouter: {
     apiKey: process.env.OPENROUTER_API_KEY,
-    baseUrl: 'https://openrouter.ai/api/v1',
-    chatModel: 'google/gemini-2.5-flash'
+    baseUrl: process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1',
+    chatModel: process.env.OPENROUTER_MODEL || 'google/gemini-2.5-flash'
   },
   
   // Processing parameters - optimized for document grouping
@@ -23,11 +21,16 @@ const CONFIG = {
   keywordProximity: 1000
 };
 
+/**
+ * Dynamic PUC Research Service - Main AI service for Idaho PUC document research
+ * Handles document crawling, processing, search, and AI-powered chat responses
+ */
 export class DynamicPUCResearchService {
   constructor() {
     this.currentSession = null;
     this.sessionDocuments = null;
     this.chatSessions = new Map();
+    this.processor = new DocumentProcessor();
   }
 
   // ✅ CORE INITIALIZATION
@@ -74,19 +77,12 @@ export class DynamicPUCResearchService {
     }
   }
 
-  async conductResearch(sessionId, query, utilities, dateRange, testMode) {
+  async conductResearch(sessionId, query, utilities, dateRange) {
     try {
       console.log('📊 Step 1: Getting documents...');
 
-      let crawlerResults;
-      if (testMode) {
-        console.log('🧪 Using pre-loaded test data...');
-        const result = await this.loadExistingDocuments('/Users/juandi/Downloads/extracted_texts/');
-        return { summary: { totalDocuments: result.totalDocuments, companies: [], utilityTypes: [] }, chunks: this.sessionDocuments };
-      } else {
-        console.log('🌍 Crawling live data...');
-        crawlerResults = await crawlCases(query, utilities, dateRange, 15);
-      }
+      console.log('🌍 Crawling live data...');
+      const crawlerResults = await crawlCases(query, utilities, dateRange, 15);
       
       console.log('📊 Step 2: Processing documents...');
       const processedData = await processExtractedDocuments(crawlerResults);
@@ -179,7 +175,7 @@ export class DynamicPUCResearchService {
         headers: {
           'Authorization': `Bearer ${CONFIG.openRouter.apiKey}`,
           'Content-Type': 'application/json',
-          'HTTP-Referer': 'https://idaho-puc-research.local',
+          'HTTP-Referer': process.env.APP_REFERER_URL || 'https://idaho-puc-research.local',
           'X-Title': 'Idaho PUC Research Assistant'
         },
         body: JSON.stringify({
@@ -695,7 +691,7 @@ Return ONLY the JSON response. No other text.`;
     try {
       // Try structured data first
       if (chunk.structured?.metadata?.witness) {
-        const witnessFromStructured = this.cleanWitnessName(chunk.structured.metadata.witness);
+        const witnessFromStructured = this.processor.cleanWitnessName(chunk.structured.metadata.witness);
         if (witnessFromStructured) return witnessFromStructured;
       }
       
@@ -710,7 +706,7 @@ Return ONLY the JSON response. No other text.`;
       for (const pattern of witnessPatterns) {
         const match = docName.match(pattern);
         if (match && match[1]) {
-          const witnessFromDoc = this.cleanWitnessName(match[1]);
+          const witnessFromDoc = this.processor.cleanWitnessName(match[1]);
           if (witnessFromDoc) return witnessFromDoc;
         }
       }
@@ -722,31 +718,7 @@ Return ONLY the JSON response. No other text.`;
     }
   }
 
-  cleanWitnessName(name) {
-    if (!name || typeof name !== 'string' || name.trim() === '') {
-      return null;
-    }
-    
-    try {
-      return name
-        .replace(/\s+/g, ' ')
-        .replace(/\.$/, '')
-        .replace(/\s+-\s+REDACTED/i, '')
-        .trim()
-        .split(' ')
-        .filter(word => word.length > 0)
-        .map(word => {
-          if (word.length <= 2 && word.endsWith('.')) {
-            return word.toUpperCase();
-          }
-          return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
-        })
-        .join(' ');
-    } catch (error) {
-      console.warn('Error cleaning witness name:', name, error);
-      return null;
-    }
-  }
+
 
   cleanDocumentName(docName) {
     if (!docName) return 'Direct Testimony';
@@ -844,124 +816,6 @@ Return ONLY the JSON response. No other text.`;
       citations: [],
       timestamp: new Date().toISOString(),
       sessionId: sessionId
-    };
-  }
-
-  // ✅ DOCUMENT LOADING (for test mode)
-  async loadExistingDocuments(documentsPath) {
-    try {
-      console.log(`📂 Loading existing documents from: ${documentsPath}`);
-      
-      const files = await fs.readdir(documentsPath);
-      const txtFiles = files.filter(file => file.endsWith('.txt'));
-      
-      console.log(`📁 Found ${txtFiles.length} text files`);
-      
-      const allExtractedDocuments = [];
-      
-      for (const filename of txtFiles) {
-        try {
-          const filepath = path.join(documentsPath, filename);
-          const content = await fs.readFile(filepath, 'utf8');
-          const documentData = this.parseDocumentDataWithUrl(filename, content, filepath);
-          allExtractedDocuments.push(documentData);
-        } catch (error) {
-          console.log(`⚠️ Error reading ${filename}:`, error.message);
-        }
-      }
-      
-      console.log(`✅ Successfully loaded ${allExtractedDocuments.length} documents`);
-      
-      const mockCrawlerResults = {
-        allExtractedDocuments,
-        summary: {
-          totalDocuments: allExtractedDocuments.length,
-          totalCases: new Set(allExtractedDocuments.map(doc => doc.caseNumber)).size,
-        },
-        chatReadyData: {
-          companies: [...new Set(allExtractedDocuments.map(doc => doc.company))],
-          utilityTypes: [...new Set(allExtractedDocuments.map(doc => doc.utilityType))],
-        }
-      };
-      
-      const processedData = await processExtractedDocuments(mockCrawlerResults);
-      this.sessionDocuments = this.prepareDocumentsForSearch(processedData.chunks);
-      
-      const chunksWithUrls = this.sessionDocuments.filter(doc => doc.metadata.documentUrl).length;
-      console.log(`🔍 Prepared ${this.sessionDocuments.length} searchable chunks (${chunksWithUrls} with URLs)`);
-      
-      return {
-        totalDocuments: allExtractedDocuments.length,
-        totalChunks: this.sessionDocuments.length,
-        ready: true
-      };
-      
-    } catch (error) {
-      console.error('❌ Error loading existing documents:', error);
-      throw error;
-    }
-  }
-
-  parseDocumentDataWithUrl(filename, content, filepath) {
-    const caseNumberMatch = filename.match(/([A-Z]{2,4}-[A-Z]-\d{2}-\d{2})/);
-    const caseNumber = caseNumberMatch ? caseNumberMatch[1] : 'UNKNOWN';
-    
-    const companyMap = {
-      'AVU': 'Avista Utilities',
-      'IPC': 'Idaho Power',
-      'PAC': 'PacifiCorp', 
-      'INT': 'Intermountain Gas'
-    };
-    const companyCode = caseNumber.split('-')[0];
-    const company = companyMap[companyCode] || 'Unknown Company';
-    
-    const utilityType = caseNumber.includes('-E-') ? 'electric' : 
-                       caseNumber.includes('-G-') ? 'natural_gas' : 'unknown';
-    
-    const documentType = filename.includes('DIRECT') ? 'Company_Direct_Testimony' : 'Staff_Document';
-    
-    // Extract document URL from metadata section
-    let documentUrl = null;
-    const metadataEnd = content.indexOf('===== END METADATA =====');
-    if (metadataEnd !== -1) {
-      const metadataSection = content.substring(0, metadataEnd);
-      const lines = metadataSection.split('\n');
-      
-      for (const line of lines) {
-        if (line.includes('Document Source:') && line.includes('http')) {
-          const urlMatch = line.match(/(https?:\/\/[^\s]+)/);
-          if (urlMatch) {
-            documentUrl = urlMatch[1];
-            break;
-          }
-        }
-      }
-    }
-    
-    // Extract actual content (skip metadata section)
-    let actualContent = content;
-    if (metadataEnd !== -1) {
-      actualContent = content.substring(metadataEnd + 25).trim();
-    }
-    
-    // Count pages
-    const pageMatches = content.match(/--- PAGE \d+ ---/g);
-    const pages = pageMatches ? pageMatches.length : 1;
-    
-    return {
-      filename: filename.replace('.txt', ''),
-      filepath: filepath,
-      caseNumber: caseNumber,
-      company: company,
-      utilityType: utilityType,
-      caseStatus: 'closed',
-      documentName: filename.replace('.txt', '').replace(/_/g, ' '),
-      documentType: documentType,
-      content: actualContent,
-      textLength: actualContent.length,
-      pages: pages,
-      extractedAt: new Date().toISOString(),
-      documentUrl: documentUrl
     };
   }
 

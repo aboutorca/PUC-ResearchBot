@@ -472,22 +472,29 @@ class DocumentProcessor {
   }
 
   cleanWitnessName(name) {
-    if (!name || typeof name !== 'string') return null;
+    if (!name || typeof name !== 'string' || name.trim() === '') {
+      return null;
+    }
     
-    return name
-      .replace(/\s+/g, ' ')
-      .replace(/\.$/, '')
-      .replace(/\s+-\s+REDACTED/i, '')
-      .trim()
-      .split(' ')
-      .filter(word => word.length > 0)
-      .map(word => {
-        if (word.length <= 2 && word.endsWith('.')) {
-          return word.toUpperCase();
-        }
-        return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
-      })
-      .join(' ');
+    try {
+      return name
+        .replace(/\s+/g, ' ')
+        .replace(/\.$/, '')
+        .replace(/\s+-\s+REDACTED/i, '')
+        .trim()
+        .split(' ')
+        .filter(word => word.length > 0)
+        .map(word => {
+          if (word.length <= 2 && word.endsWith('.')) {
+            return word.toUpperCase();
+          }
+          return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+        })
+        .join(' ');
+    } catch (error) {
+      console.warn('Error cleaning witness name:', name, error);
+      return null;
+    }
   }
 
   generateBasicSearchTerms(content) {
@@ -529,7 +536,15 @@ class DocumentProcessor {
   }
 }
 
-// ✅ MAIN EXPORT FUNCTION
+/**
+ * Process extracted documents from crawler into AI-ready chunks with JSON overlay
+ * @param {Object} crawlerResults - Results from the crawler containing extracted documents
+ * @param {Object} options - Optional configuration overrides
+ * @param {number} [options.chunkSize] - Size of text chunks (default: 1500)
+ * @param {number} [options.chunkOverlap] - Overlap between chunks (default: 200)
+ * @param {number} [options.minChunkSize] - Minimum chunk size (default: 300)
+ * @returns {Promise<Object>} Processed data with chunks, stats, and metadata
+ */
 export async function processExtractedDocuments(crawlerResults, options = {}) {
   const processor = new DocumentProcessor();
   

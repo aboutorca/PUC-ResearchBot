@@ -3,58 +3,6 @@ import { v4 as uuidv4 } from 'uuid';
 import fs from 'fs';
 import path from 'path';
 
-// === DEBUGGING CODE - REMOVE AFTER FIXING FAILURES ===
-const DEBUG_FAILURES = {
-  failed: [],
-  record: function(caseNumber, documentName, documentUrl, company, error, workerId) {
-    this.failed.push({
-      caseNumber,
-      documentName, 
-      documentUrl,
-      company,
-      error: error.message,
-      workerId,
-      timestamp: new Date().toISOString()
-    });
-    console.log(`❌ FAILURE ${this.failed.length}: ${documentName} - ${error.message}`);
-  },
-  
-  report: function() {
-    if (this.failed.length === 0) {
-      console.log('\n✅ NO FAILURES - Perfect run!');
-      return;
-    }
-    
-    console.log(`\n🔍 FAILURE REPORT - ${this.failed.length} documents failed:`);
-    console.log('='.repeat(60));
-    
-    this.failed.forEach((failure, i) => {
-      console.log(`\n${i+1}. ${failure.documentName}`);
-      console.log(`   Case: ${failure.caseNumber} | Company: ${failure.company}`);
-      console.log(`   Error: ${failure.error}`);
-      console.log(`   URL: ${failure.documentUrl}`);
-      console.log(`   Worker: ${failure.workerId} | Time: ${failure.timestamp}`);
-    });
-    
-    // Quick pattern analysis
-    const errorTypes = {};
-    this.failed.forEach(f => {
-      const errorType = f.error.includes('timeout') ? 'TIMEOUT' : 
-                       f.error.includes('network') ? 'NETWORK' : 'OTHER';
-      errorTypes[errorType] = (errorTypes[errorType] || 0) + 1;
-    });
-    
-    console.log(`\n📊 Error patterns:`);
-    Object.entries(errorTypes).forEach(([type, count]) => {
-      console.log(`   ${type}: ${count} failures`);
-    });
-    
-    console.log('\n💡 Next steps: Check the URLs above manually to see what they have in common');
-    console.log('='.repeat(60));
-  }
-};
-// === END DEBUGGING CODE ===
-
 const caseListingUrls = [
   { url: 'https://puc.idaho.gov/case?util=1&closed=0', type: 'electric', status: 'open' },
   { url: 'https://puc.idaho.gov/case?util=1&closed=1', type: 'electric', status: 'closed' },
@@ -1017,7 +965,7 @@ async function extractDocumentText(page, documentUrl, documentName, caseNumber, 
 
   } catch (error) {
     // === ADD FAILURE TRACKING ===
-    DEBUG_FAILURES.record(caseNumber, documentName, documentUrl, caseInfo.company, error, workerId);
+
     console.log(`[Worker ${workerId}] 💥 Error extracting text from ${documentName}: ${error.message}`);
     return null;
   }
@@ -1553,7 +1501,7 @@ class ProvenWorkingCrawler {
     result.summary.processingTime = Math.round((Date.now() - startTime) / 1000);
     
     // === ADD FAILURE REPORT ===
-    DEBUG_FAILURES.report();
+
     
     console.log('\n🎉 PROVEN WORKING extraction complete!');
     console.log(`📊 Summary: ${result.summary.totalCases} cases, ${result.summary.totalTextFiles} text files created`);

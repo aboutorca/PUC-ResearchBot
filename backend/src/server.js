@@ -29,13 +29,12 @@ app.get('/api/status', (req, res) => {
   }
 });
 
-// Endpoint to initialize a research session (now handles mode)
+// Endpoint to initialize a research session
 app.post('/api/initialize', async (req, res) => {
   try {
-    const { testMode } = req.body;
     // The service is already initialized at startup, so we just create a session ID.
     const sessionId = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    console.log(`✅ New session created: ${sessionId} in ${testMode ? 'Test' : 'Live'} Mode`);
+    console.log(`✅ New session created: ${sessionId}`);
     
     // In a real multi-user app, we'd associate this session with a user.
     // For now, sending it back to the client is enough.
@@ -50,13 +49,12 @@ app.post('/api/initialize', async (req, res) => {
 // Endpoint to start research
 app.post('/api/research', async (req, res) => {
   try {
-    const { query, utilityType, fromYear, toYear, testMode } = req.body;
+    const { query, utilityType, fromYear, toYear } = req.body;
     const result = await researchService.startResearch(
       query,
       'user-from-frontend',
       utilityType,
-      { start: fromYear, end: toYear },
-      testMode
+      { start: fromYear, end: toYear }
     );
     res.json({ success: true, ...result });
   } catch (error) {
