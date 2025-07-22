@@ -280,7 +280,7 @@ export class DynamicPUCResearchService {
         citationTemplate: doc.witness ? 
           `${doc.company}'s Direct Testimony of ${doc.witness} in Case ${doc.caseNumber}` :
           `${doc.company}'s ${this.cleanDocumentName(doc.documentName)} in Case ${doc.caseNumber}`,
-        content: doc.combinedContent.join('\n\n--- SECTION BREAK ---\n\n').substring(0, 6000), // Reduced for better focus
+        content: doc.combinedContent.join('\n\n--- SECTION BREAK ---\n\n').substring(0, 6000),
         documentUrl: doc.documentUrl
       };
     });
@@ -293,20 +293,33 @@ ${JSON.stringify(documentData, null, 2)}
 
 USER QUERY: ${query}
 
+CITATION REQUIREMENTS - CRITICAL:
+You MUST use the exact citation templates provided above. Every reference to testimony must include the witness name, not just the case number.
+
+CORRECT CITATIONS:
+"Idaho Power's Direct Testimony of Thompson in Case IPC-E-25-16"
+"Avista Utilities' Direct Testimony of H. Rosentrater in Case AVU-E-25-01"
+"Direct Testimony of Kivisto in Case INT-G-25-02"
+
+INCORRECT CITATIONS (DO NOT USE):
+"in Case IPC-E-25-16" (missing witness name)
+"Case AVU-E-25-01" (missing witness name)
+"IPC-E-25-16 testimony" (missing witness name)
+
 RESPONSE REQUIREMENTS:
 You must return a JSON response that will be rendered by React components. The response must be:
 - CONCISE and scannable (not a wall of text)
 - Professional but readable
-- Include specific case numbers for all claims
+- Include specific witness names for all testimony references
 - Use exact citation templates provided
 
 REQUIRED JSON FORMAT:
 {
-  "answer": "Brief professional summary with case references",
+  "answer": "Brief professional summary with witness-specific citations",
   "keyFindings": [
-    "Specific finding with case number",
-    "Another finding with case number",
-    "Cross-utility comparison with case numbers"
+    "Specific finding with witness name and case number",
+    "Another finding with witness name and case number",
+    "Cross-utility comparison with witness names and case numbers"
   ],
   "confidence": "high|medium|low",
   "caveat": "Brief limitation note if applicable"
@@ -314,37 +327,37 @@ REQUIRED JSON FORMAT:
 
 ANSWER FIELD RULES:
 - Keep to 2-4 sentences maximum
-- Include 2-3 specific case numbers with rates/amounts
+- Include 2-3 specific witness citations with rates/amounts
 - Write naturally, like: "According to Idaho Power's Direct Testimony of Thompson in Case IPC-E-25-16, the company requests a 10.4% ROE."
+- ALWAYS include witness names in citations - never use bare case numbers
 - NO markdown headers (##) - plain text only
 - NO bullet points in answer - save those for keyFindings
 
 KEY FINDINGS RULES:
 - Maximum 5 bullet points
 - Each must include specific data (rates, amounts, percentages)
-- Each must include a case number
-- Format like: "Idaho Power requests 10.4% ROE in Case IPC-E-25-16"
+- Each must include a witness name AND case number
+- Format like: "Idaho Power's Direct Testimony of Thompson requests 10.4% ROE in Case IPC-E-25-16"
 - Focus on quantitative findings, not general statements
+- NEVER use bare case numbers without witness names
+
+WITNESS NAME REQUIREMENTS:
+- Use the witness names from the citationTemplate field above
+- If witness is not available, use the company name with document type
+- Examples: "Idaho Power's Direct Testimony of Thompson", "Avista Utilities' Direct Testimony of H. Rosentrater"
 
 CONFIDENCE LEVELS:
 - "high": Multiple utilities with specific data points
 - "medium": Some utilities with partial data
 - "low": Limited or unclear information
 
-CAVEAT RULES:
-- Only include if there are genuine limitations
-- Keep to one sentence
-- Examples: "Final authorized rates may differ from requested rates" or "Analysis limited to electric utility filings"
-
-EXAMPLES:
-
 GOOD RESPONSE:
 {
   "answer": "Utilities are requesting return on equity (ROE) rates between 9.6% and 10.4%. According to Idaho Power's Direct Testimony of Thompson in Case IPC-E-25-16, the company seeks a 10.4% ROE, while Avista Utilities' Direct Testimony of Kalich in Case AVU-E-25-01 requests 9.6%.",
   "keyFindings": [
-    "Idaho Power requests 10.4% ROE in Case IPC-E-25-16",
-    "Avista Utilities proposes 9.6% ROE in Case AVU-E-25-01",
-    "PacifiCorp seeks 10.0% ROE in Case PAC-E-24-04",
+    "Idaho Power's Direct Testimony of Thompson requests 10.4% ROE in Case IPC-E-25-16",
+    "Avista Utilities' Direct Testimony of Kalich proposes 9.6% ROE in Case AVU-E-25-01",
+    "PacifiCorp's Direct Testimony of Meredith seeks 10.0% ROE in Case PAC-E-24-04",
     "Average requested ROE across utilities is 10.0%"
   ],
   "confidence": "high",
@@ -353,10 +366,10 @@ GOOD RESPONSE:
 
 BAD RESPONSE (DON'T DO THIS):
 {
-  "answer": "## Summary\n\nUtilities consistently highlight challenges in achieving their authorized rates of return due to regulatory lag...", // Too long, has markdown
+  "answer": "Utilities consistently highlight challenges in achieving their authorized rates of return. In Case IPC-E-25-16, the company requests...", // Missing witness name
   "keyFindings": [
-    "Utilities face challenges", // No case number, too vague
-    "Rates are important" // No specific data
+    "Utilities face challenges in Case AVU-E-25-01", // No witness name, too vague
+    "Rates are important in Case INT-G-25-02" // No witness name, no specific data
   ]
 }
 
